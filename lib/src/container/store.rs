@@ -851,6 +851,7 @@ impl ImageImporter {
 
         let mut layer_commits = Vec::new();
         let mut layer_filtered_content: MetaFilteredData = HashMap::new();
+        let mut derived_layers_exists = false;
         for layer in import.layers {
             if let Some(c) = layer.commit {
                 tracing::debug!("Reusing fetched commit {}", c);
@@ -884,6 +885,7 @@ impl ImageImporter {
                     .await
                     .with_context(|| format!("Parsing layer blob {}", layer.digest()))?;
                 layer_commits.push(r.commit);
+                derived_layers_exists = true;
                 if !r.filtered.is_empty() {
                     let filtered = HashMap::from_iter(r.filtered.into_iter());
                     tracing::debug!("Found {} filtered toplevels", filtered.len());
@@ -963,7 +965,7 @@ impl ImageImporter {
 
                 // Layer all subsequent commits
                 checkout_opts.process_whiteouts = true;
-                for commit in layer_commits {
+                for commit in &layer_commits {
                     repo.checkout_at(
                         Some(&checkout_opts),
                         (*td).as_raw_fd(),
@@ -972,6 +974,17 @@ impl ImageImporter {
                         cancellable,
                     )
                     .with_context(|| format!("Checking out layer {commit}"))?;
+                }
+
+                // IF the image is not derived (it only contains pure OSTree commits layers)
+                // Skip the merge commit and return the last encapsulated ostree commit
+                // This preserves the ostree signature, which allows for composeFS
+                // signature to work in OCI images
+                // See https://github.com/ostreedev/ostree-rs-ext/issues/630
+
+                if derived_layers_exists  {
+                    let state = query_image_commit(repo, &layer_commits.last().ok_or(anyhow!("Cannot retrieve layer commit"))?)?;
+                    return Ok(state);
                 }
 
                 let modifier =
